@@ -9,7 +9,7 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
             },
             run: false,
             endpoint: '',
-            maxGroup: 10,
+            maxGroup: 100000,
             version: 100
         }
         
@@ -29,7 +29,7 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
                     case 'request':
                         (() => {
                             const {id, ns, operation, args} = data[op];
-                            GLOBALS.queue.push({id, ns, operation, args});
+                            setTimeout(() => { GLOBALS.queue.push({id, ns, operation, args}) }, 0)
                         })()
                         break
                     case 'start':
@@ -206,7 +206,6 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
     }.toString(),
 ')()'], {type: 'application/javascript'}));
 
-
 /** API Code */
 function PJApi () {
     if (PJApi._instance) {
@@ -271,6 +270,9 @@ PJApi.prototype = {
         this.ww.terminate()
     },
     setEndpoint: function (endpoint) {
+        if (endpoint instanceof URL) {
+            endpoint = endpoint.toString()
+        }
         if (this.ww === null) {
             this.postPoned.push([this.setEndpoint, [endpoint]])
             return
@@ -305,7 +307,7 @@ PJApi.prototype = {
         }
         this.ww.postMessage({setVersion: {version: version}})
     },
-    exec: function (namespace, operation, args) {
+    exec: function (namespace, operation, args = {}) {
         if (this.ww === null) {
             return new Promise((resolve, reject) => {
                 this.postPoned.push([this.exec, [namespace, operation, args]])
