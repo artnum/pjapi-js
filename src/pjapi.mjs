@@ -83,7 +83,7 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
 
         function readStreamChunk(chunk) {
             const lines = chunk.split("\r\n")
-            let i = 1; /* split at boundary create an empty line */
+            let i = 0; /* split at boundary create an empty line */
             if (lines.length < 1) { return [] }
             const headers = new Headers()
             while(i < lines.length && lines[i].length > 0) {
@@ -113,21 +113,50 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
             }
         }
 
+        function splitStreamChunk (boundary, stream)
+        {
+            const boundary_len = boundary.length + 2
+            let leftOver = ''
+            const chunks = []
+            let start = 0
+            while(true) {
+                start = stream.indexOf(boundary)
+                if (start === -1) {
+                    leftOver = stream
+                    break
+                }
+                let stop = stream.indexOf(boundary, start +  boundary_len)
+                if (stop === -1) {
+                    leftOver = stream
+                    break
+                }
+                chunks.push(stream.slice(start + boundary_len, stop))
+                stream = stream.slice(stop)
+            }
+            return [chunks, leftOver]
+        }
+
         function readStreamBody(boundary, stream, accumulator = '') {
             return new Promise((resolve, reject) => {
                 stream.read()
                 .then(({value, done}) => {
-                    const text = new TextDecoder().decode(value)
-                    const chunks = text.split(boundary)
-                    for(let i = 0; i < chunks.length; i++) {
-                        readStreamChunk(chunks[i])
-                    }
-                    if (!done) { 
+                    if (!done && value.length > 0) { 
+                        const text = new TextDecoder().decode(value)
+                        const [chunks, leftOver] = splitStreamChunk(boundary, accumulator + text)
+                        accumulator = leftOver
+                        if (chunks.length > 0) {
+                            for(let i = 0; i < chunks.length; i++) {
+                                readStreamChunk(chunks[i])
+                            }
+                        }
+                        
                         readStreamBody(boundary, stream, accumulator)
                         .then(_ => { resolve() })
+                        .catch(e => reject(e))
                     }
                     return resolve()
                 })
+                .catch(e => console.log(e))
             })
         }
         
@@ -223,7 +252,7 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
 ')()'], {type: 'application/javascript'}));
 
 /** API Code */
-export class PJApi {
+export default class PJApi {
     constructor() {
         this.postPoned = []
         this.ww = null
