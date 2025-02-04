@@ -73,54 +73,61 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
         function error (err) {
             postMessage({id: 0, result: {error: true, message: err}})
         }
-        
-        function readBody (textPromise, boundary) {
-            textPromise.then(body => {
-                const parts = body.split(boundary)
-                for (let i = 0; i < parts.length; i++) {
-                    const part = parts[i].trim()
-                    if (part.length === 0) { continue }
-                    const lines = part.split('\r\n').map(str => str.trim())
-                    const headers = {}
-                    let body = ''
-                    let j = 0
-                    for (; j < lines.length; j++) {
-                        if (lines[j].length === 0) {
-                            break
-                        }
-                        const [key, value] = lines[j].split(':')
-                        if (value === undefined) { continue }
-                        headers[key.toLowerCase()] = value.trim()
-                    }
-                    j++
-                    for (; j < lines.length; j++) {
-                        body += lines[j]
-                    }
-                    if (body.length === 0) { continue }
-        
-                    if (headers['content-type'] === undefined) {
-                        error('Invalid content type')
-                        continue
-                    }
-                    const contentType = headers['content-type'].split(';')
-                    if (contentType[0] !== 'application/json') {
-                        error('Invalid content type')
-                        continue
-                    }
-                    
+    
+        function getChunkHeader (headers, line)
+        {
+            const [name, value] = line.split(':', 2)
+            if (!name || !value) return;
+            headers.append(name.trim().toLowerCase(), value.trim())
+        }
+
+        function readStreamChunk(chunk) {
+            const lines = chunk.split("\r\n")
+            let i = 1; /* split at boundary create an empty line */
+            if (lines.length < 1) { return [] }
+            const headers = new Headers()
+            while(i < lines.length && lines[i].length > 0) {
+                getChunkHeader(headers, lines[i])
+                i++;
+            }
+            while (i < lines.length && lines[i].length == 0) {
+                i++;
+            }
+            let j = i
+            while(j < lines.length && lines[j].length > 0) {
+                j++;
+            }
+            const responses = lines.slice(i, j)
+            if (responses.length > 0) {
+                for(let i = 0; i < responses.length; i++) {
+                    if (!headers.get('content-type').toLocaleLowerCase().startsWith('application/json')) { continue; }
                     try {
-                        const result = JSON.parse(body)
-                        if (result.error) {
-                            error(result.message)
-                            continue
-                        }
-                        Object.keys(result).forEach(id => {
-                            postMessage({id, result: result[id]})
+                        const object = JSON.parse(responses[i])
+                        if (object.error) { error(result.message) }
+                        Object.keys(object).forEach(id => {
+                            postMessage({id, result: object[id]})
                         })
-                    } catch (e) {
-                        error(e.message)
+                    } catch(e) {
                     }
-                }        
+                }
+            }
+        }
+
+        function readStreamBody(boundary, stream, accumulator = '') {
+            return new Promise((resolve, reject) => {
+                stream.read()
+                .then(({value, done}) => {
+                    const text = new TextDecoder().decode(value)
+                    const chunks = text.split(boundary)
+                    for(let i = 0; i < chunks.length; i++) {
+                        readStreamChunk(chunks[i])
+                    }
+                    if (!done) { 
+                        readStreamBody(boundary, stream, accumulator)
+                        .then(_ => { resolve() })
+                    }
+                    return resolve()
+                })
             })
         }
         
@@ -130,7 +137,9 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
                     {
                         method: 'POST', 
                         body: JSON.stringify(request),
-                        headers: GLOBALS.headers
+                        headers: GLOBALS.headers,
+                        keepalive: true,
+                        priority: 'high'
                     }
                 )
                 .then(response => {
@@ -154,8 +163,11 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
                         error('Invalid content type')
                         return resolve()
                     }
-                    readBody(response.text(), contentType.boundary)
-                    resolve()
+
+                    readStreamBody(contentType.boundary, response.body.getReader())
+                    .then(_ => {
+                        resolve()
+                    })
                 })
                 .catch(e => {
                     error(e.message)
@@ -173,7 +185,11 @@ const WorkerBlob = URL.createObjectURL(new Blob(['(',
                 let i = 0
                 while (GLOBALS.queue.length > 0 && i < GLOBALS.maxGroup) {
                     const {id, ns, operation, args} = GLOBALS.queue.shift()
-                    request.payload[id] = {ns, function: operation, arguments: args}
+                    request.payload[id] = {
+                        ns,
+                        function: operation,
+                        arguments: args
+                    }
                     i++
                 }
         
@@ -227,7 +243,13 @@ export class PJApi {
         this.ww = new Worker(WorkerBlob);
         this.ww.onmessage = (e) => {
             const {id, result} = e.data;
-            if (id == 0 || id === undefined || id === null || result === undefined || result === null) {
+            if (
+                    id == 0
+                    || id === undefined
+                    || id === null
+                    || result === undefined
+                    || result === null
+            ) {
                 console.error(result.message)
                 return;
             }
@@ -261,6 +283,13 @@ export class PJApi {
         this.ww.postMessage({stop: 1})
     }
 
+    getRequestId() {
+        return new Promise((resolve, reject) => {
+            ++this.reqid
+            return resolve(this.reqid.toString())
+        })
+    }
+
     immediate (namespace, operation, args) {
         if (this.ww === null) {
             return new Promise((resolve, reject) => {
@@ -268,8 +297,12 @@ export class PJApi {
             })
         }
         return new Promise((resolve, reject) => {
-            this.ww.postMessage({immediate: {id: String(++this.reqid), ns: namespace, operation: operation, args: args}});
-            this.waits.set(String(this.reqid), {resolve, reject});
+            this.getRequestId()
+            .then(id => {
+                this.ww.postMessage({immediate: {id: id, ns: namespace, operation: operation, args: args}});
+                this.waits.set(id, {resolve, reject});
+            })
+            .catch(e => reject(e))
         })
     }
     
@@ -324,12 +357,20 @@ export class PJApi {
     exec(namespace, operation, args = {}) {
         if (this.ww === null) {
             return new Promise((resolve, reject) => {
-                this.postPoned.push([this.exec, [namespace, operation, args]])
+                this.postPoned.push([
+                    this.exec,
+                    [namespace, operation, args],
+                    [resolve, reject]
+                ])
             })
         }
         return new Promise((resolve, reject) => {
-            this.ww.postMessage({request: {id: String(++this.reqid), ns: namespace, operation: operation, args: args}});
-            this.waits.set(String(this.reqid), {resolve, reject});
+            this.getRequestId()
+            .then(id => {
+                this.ww.postMessage({request: {id: id, ns: namespace, operation: operation, args: args}});
+                this.waits.set(id, {resolve, reject});
+            })
+            .catch(e => reject(e))
         })
     }
 
